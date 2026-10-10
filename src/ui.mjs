@@ -2,9 +2,13 @@
  * The ACC control panel.
  *
  * Accessibility is a requirement here, not a nicety: the panel is fully
- * keyboard-operable, every control has a real <label>, status changes are
- * announced through `aria-live` regions, and state is never conveyed by colour
- * alone (each status also carries text).
+ * keyboard-operable, every control has a real <label>, dynamic state is
+ * announced through live regions, targets meet the 24px minimum, and state is
+ * never conveyed by colour alone — each status also carries text.
+ *
+ * Client connection is one control per client whose label follows the real
+ * state of the config files, so "connect" and "disconnect" are never both
+ * offered at once.
  */
 
 export function panelHtml() {
@@ -17,15 +21,15 @@ export function panelHtml() {
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff; --fg: #16181d; --muted: #4a4f5a; --line: #c9cdd6;
-    --card: #f6f7f9; --accent: #1f4fd8; --accent-fg: #ffffff;
-    --ok: #0f6b3d; --warn: #8a5200; --bad: #a01a1a;
+    --bg: #ffffff; --fg: #16181d; --muted: #454a55; --line: #c2c7d0;
+    --card: #f5f6f8; --accent: #1b46c2; --accent-fg: #ffffff;
+    --ok: #0d5c35; --warn: #7d4a00; --bad: #971717;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #16181d; --fg: #f2f4f8; --muted: #b9bfcb; --line: #3a3f4a;
-      --card: #1e2128; --accent: #8fb0ff; --accent-fg: #10131a;
-      --ok: #7ee2a8; --warn: #ffcc80; --bad: #ff9a9a;
+      --bg: #16181d; --fg: #f2f4f8; --muted: #c3c9d4; --line: #40454f;
+      --card: #1e2128; --accent: #9db8ff; --accent-fg: #10131a;
+      --ok: #8ce8b0; --warn: #ffd08a; --bad: #ffa8a8;
     }
   }
   * { box-sizing: border-box; }
@@ -38,7 +42,10 @@ export function panelHtml() {
   h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
   h2 { font-size: 1.2rem; margin: 2rem 0 .75rem; }
   h3 { font-size: 1rem; margin: 0 0 .5rem; }
-  p.lede, p.hint { color: var(--muted); margin: .25rem 0 .75rem; }
+  p.lede, p.hint, p.meta { color: var(--muted); }
+  p.lede { margin: .25rem 0 .75rem; }
+  p.hint { margin: .25rem 0 .75rem; }
+  p.meta { margin: .35rem 0 .5rem; font-size: .95rem; }
   .skip { position: absolute; left: -9999px; }
   .skip:focus {
     position: static; display: inline-block; margin-bottom: 1rem;
@@ -56,35 +63,41 @@ export function panelHtml() {
     outline: 3px solid var(--accent); outline-offset: 2px;
   }
   button {
-    font: inherit; font-weight: 600; padding: .5rem .9rem; border-radius: .3rem;
-    border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer;
+    font: inherit; font-weight: 600; padding: .55rem .95rem; min-height: 2rem;
+    border-radius: .3rem; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); cursor: pointer;
   }
   button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
   button.danger { color: var(--bad); }
   fieldset { border: 1px solid var(--line); border-radius: .5rem; padding: .9rem 1rem 1rem; margin: 0 0 1rem; }
   legend { font-weight: 700; padding: 0 .35rem; }
   .switch { display: flex; align-items: center; gap: .5rem; }
-  .switch input { width: 1.15rem; height: 1.15rem; }
+  .switch input { width: 1.25rem; height: 1.25rem; }
   .switch label { margin: 0; }
   .status { font-weight: 700; }
   .status.on { color: var(--ok); }
   .status.off { color: var(--muted); }
   .status.attention { color: var(--warn); }
   .status.error { color: var(--bad); }
-  .meta { color: var(--muted); font-size: .95rem; }
+  p.state { margin: .5rem 0; padding: .5rem .65rem; border-left: 4px solid var(--line); background: var(--bg); }
   table { border-collapse: collapse; width: 100%; font-size: .95rem; }
   caption { text-align: left; color: var(--muted); padding-bottom: .35rem; }
   th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }
   th { white-space: nowrap; }
   .log { border: 1px solid var(--line); border-radius: .3rem; padding: .6rem .75rem; min-height: 2.5rem; background: var(--bg); }
+  .log ul { margin: 0; padding-left: 1.2rem; }
   .log li { margin: .15rem 0; }
   code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
   .scroll { max-height: 22rem; overflow: auto; border: 1px solid var(--line); border-radius: .3rem; }
+  .scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
   dl.kv dt { font-weight: 600; }
   dl.kv dd { margin: 0; overflow-wrap: anywhere; }
-  details { margin-top: .5rem; }
+  details { margin: .5rem 0; }
   summary { cursor: pointer; font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -101,9 +114,58 @@ export function panelHtml() {
   </header>
 
   <main id="main">
+    <section aria-labelledby="h-connect">
+      <h2 id="h-connect">Connect Claude</h2>
+      <p class="hint">Each button connects when you are disconnected and disconnects when you are connected.</p>
+
+      <div class="card">
+        <h3>Claude Code (CLI)</h3>
+        <p class="meta">Writes <code>~/.claude/settings.json</code>: base URL, token, gateway model discovery and the fallback model.</p>
+        <p class="state" id="claude-code-state" role="status" aria-live="polite"></p>
+        <button type="button" id="claude-code-toggle"></button>
+        <p class="meta" id="claude-code-path"></p>
+      </div>
+
+      <div class="card">
+        <h3>Claude Desktop</h3>
+        <p class="meta">Adds an ACC entry to Desktop's third-party-inference library and switches Desktop into gateway mode.</p>
+        <p class="state" id="claude-desktop-state" role="status" aria-live="polite"></p>
+        <button type="button" id="claude-desktop-toggle"></button>
+        <p class="meta" id="claude-desktop-path"></p>
+        <p class="meta">Quit and reopen Desktop after connecting. Other entries in its library are left in place.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-system">
+      <h2 id="h-system">Startup and gateway</h2>
+
+      <div class="card">
+        <h3>Start ACC when I sign in</h3>
+        <p class="meta" id="boot-detail"></p>
+        <p class="state" id="boot-state" role="status" aria-live="polite"></p>
+        <button type="button" id="boot-toggle"></button>
+      </div>
+
+      <div class="card">
+        <h3>Make ACC the only gateway</h3>
+        <details>
+          <summary>What this does</summary>
+          <p class="meta">
+            Sets ACC as the applied Claude Desktop profile, then moves every other third-party
+            profile in Desktop's library aside (for example Free Claude Code's) so only ACC is
+            offered. The moved files are recorded, not deleted, and the button turns into
+            <em>Restore other gateways</em> so you can put them back. It also points Claude Code here.
+          </p>
+        </details>
+        <p class="meta" id="gateway-detail"></p>
+        <p class="state" id="gateway-state" role="status" aria-live="polite"></p>
+        <button type="button" class="primary" id="gateway-toggle"></button>
+      </div>
+    </section>
+
     <section aria-labelledby="h-providers">
       <h2 id="h-providers">Providers</h2>
-      <p class="hint">Disabled providers expose no models. OpenCode Zen is off until you paste a key.</p>
+      <p class="hint">Disabled providers expose no models. Everything here is off until you enable it.</p>
       <div id="providers"></div>
     </section>
 
@@ -122,30 +184,6 @@ export function panelHtml() {
           </div>
           <button type="button" class="primary" id="save-defaults">Save defaults</button>
         </div>
-      </div>
-    </section>
-
-    <section aria-labelledby="h-wiring">
-      <h2 id="h-wiring">Connect Claude</h2>
-      <p class="hint">These write the client configs directly. Nothing is sent anywhere else.</p>
-      <div class="card">
-        <h3>Claude Code (CLI)</h3>
-        <p class="meta">Sets <code>ANTHROPIC_BASE_URL</code>, a token, gateway model discovery and the default model in <code>~/.claude/settings.json</code>.</p>
-        <div class="row">
-          <button type="button" class="primary" data-connect="claude-code">Connect Claude Code</button>
-          <button type="button" data-disconnect="claude-code">Disconnect</button>
-        </div>
-        <p class="meta" id="claude-code-path"></p>
-      </div>
-      <div class="card">
-        <h3>Claude Desktop</h3>
-        <p class="meta">Adds an ACC entry to Desktop's third-party-inference library and switches Desktop into gateway mode.</p>
-        <div class="row">
-          <button type="button" class="primary" data-connect="claude-desktop">Connect Claude Desktop</button>
-          <button type="button" data-disconnect="claude-desktop">Disconnect</button>
-        </div>
-        <p class="meta" id="claude-desktop-path"></p>
-        <p class="meta">Desktop must be restarted after connecting. Keep the FCC entry separate if you still want it.</p>
       </div>
     </section>
 
@@ -172,8 +210,8 @@ export function panelHtml() {
     </section>
 
     <section aria-labelledby="h-registry">
-      <h2 id="h-registry">OpenCode built-in providers</h2>
-      <p class="hint">Enable a provider below with your own API key; its models then appear in the list above.</p>
+      <h2 id="h-registry">OpenCode provider registry</h2>
+      <p class="hint">Enable an OpenCode provider below with your own API key; its models then appear in the list above.</p>
       <div class="card">
         <label for="registry-search">Filter providers</label>
         <input type="search" id="registry-search" name="registryFilter" placeholder="deepseek, groq, openrouter…">
@@ -230,7 +268,8 @@ function renderOverview(state) {
   dl.replaceChildren();
   const rows = [
     ["Gateway URL", "http://" + state.host + ":" + state.port],
-    ["Clients", state.views.join(", ")],
+    ["Gateway mode", state.gateway.exclusive ? "ACC only" : "Shared with other gateways"],
+    ["Start at sign-in", state.boot.runAtBoot ? "On" : "Off"],
     ["Enabled providers", state.adapters.filter((a) => a.enabled).length + " of " + state.adapters.length],
     ["Config file", state.configPath],
   ];
@@ -241,6 +280,43 @@ function renderOverview(state) {
     dd.textContent = value;
     dl.append(dt, dd);
   }
+}
+
+function renderClient(label, prefix, client) {
+  const state = $(prefix + "-state");
+  state.textContent = (client.connected ? "Connected. " : "Not connected. ") + client.detail;
+  const button = $(prefix + "-toggle");
+  button.textContent = client.connected
+    ? "Disconnect " + label
+    : "Connect " + label;
+  button.className = client.connected ? "danger" : "primary";
+  $(prefix + "-path").textContent = "File: " + client.path;
+}
+
+function renderClients(state) {
+  renderClient("Claude Code", "claude-code", state.clients.claudeCode);
+  renderClient("Claude Desktop", "claude-desktop", state.clients.claudeDesktop);
+}
+
+function renderBoot(state) {
+  $("boot-detail").textContent = "Launcher: " + state.boot.entry;
+  $("boot-state").textContent = state.boot.runAtBoot
+    ? "ACC starts automatically when you sign in."
+    : "ACC does not start automatically.";
+  $("boot-toggle").textContent = state.boot.runAtBoot ? "Turn off start at sign-in" : "Start ACC at sign-in";
+}
+
+function renderGateway(state) {
+  const moved = state.gateway.movedProfiles || [];
+  $("gateway-detail").textContent = moved.length
+    ? "Set aside: " + moved.map((item) => item.name).join(", ") + " · " + state.gateway.library
+    : "Library: " + state.gateway.library;
+  $("gateway-state").textContent = state.gateway.exclusive
+    ? "ACC is the only gateway. Other third-party profiles are set aside."
+    : "Other gateways can be selected in Claude Desktop.";
+  $("gateway-toggle").textContent = state.gateway.exclusive
+    ? "Restore other gateways"
+    : "Make ACC the only gateway";
 }
 
 function renderProviders(state) {
@@ -256,8 +332,7 @@ function renderProviders(state) {
     const span = document.createElement("span");
     span.className = "status " + statusClass(adapter);
     span.textContent = statusText(adapter);
-    status.append(span, document.createTextNode(" — "));
-    status.append(document.createTextNode(adapter.detail));
+    status.append(span, document.createTextNode(" — " + adapter.detail));
     fieldset.append(status);
 
     const row = document.createElement("div");
@@ -273,12 +348,13 @@ function renderProviders(state) {
     toggleLabel.setAttribute("for", toggle.id);
     toggleLabel.textContent = "Enabled";
     switchWrap.append(toggle, toggleLabel);
+    row.append(switchWrap);
 
     if (adapter.hasKeyInput) {
       const keyWrap = document.createElement("div");
       const keyLabel = document.createElement("label");
       keyLabel.setAttribute("for", "key-" + adapter.id);
-      keyLabel.textContent = adapter.apiKey ? "API key (saved)" : "API key";
+      keyLabel.textContent = adapter.apiKey ? "API key (saved)" : "API key (optional)";
       const keyInput = document.createElement("input");
       keyInput.type = "password";
       keyInput.id = "key-" + adapter.id;
@@ -324,14 +400,14 @@ function renderProviders(state) {
       const clear = document.createElement("button");
       clear.type = "button";
       clear.className = "danger";
-      clear.textContent = "Clear key";
+      clear.textContent = "Clear saved key";
       clear.addEventListener("click", async () => {
         try {
           await api("/api/config", {
             method: "POST",
             body: JSON.stringify({ providers: { [adapter.id]: { apiKey: "" } } }),
           });
-          say(adapter.label + " key cleared.");
+          say(adapter.label + " saved key cleared. A detected credential is still used if present.");
           await refreshAll();
         } catch (error) {
           say("Could not clear key: " + error.message, "error");
@@ -408,10 +484,8 @@ function renderModels(state) {
     tbody.append(tr);
   }
   $("model-count").textContent = state.models.length + " model(s)";
-  if (state.errors && Object.keys(state.errors).length) {
-    for (const [id, message] of Object.entries(state.errors)) {
-      say(id + " catalog error: " + message, "error");
-    }
+  for (const [id, message] of Object.entries(state.errors || {})) {
+    say(id + " catalog error: " + message, "error");
   }
 }
 
@@ -484,11 +558,14 @@ async function loadRegistry() {
 async function refreshAll() {
   const state = await api("/api/state");
   renderOverview(state);
+  renderClients(state);
+  renderBoot(state);
+  renderGateway(state);
   renderProviders(state);
   renderDefaults(state);
   renderModels(state);
-  $("claude-code-path").textContent = "Writes: " + state.paths.claudeCode;
-  $("claude-desktop-path").textContent = "Writes: " + state.paths.claudeDesktop;
+  $("claude-code-path").textContent = "File: " + state.paths.claudeCode;
+  $("claude-desktop-path").textContent = "Profile: " + state.paths.claudeDesktop;
 }
 
 $("save-defaults").addEventListener("click", async () => {
@@ -517,37 +594,42 @@ $("refresh-models").addEventListener("click", async () => {
   }
 });
 
+for (const target of ["claude-code", "claude-desktop"]) {
+  $(target + "-toggle").addEventListener("click", async () => {
+    try {
+      const result = await api("/api/connect", {
+        method: "POST",
+        body: JSON.stringify({ target }),
+      });
+      say(result.message);
+      await refreshAll();
+    } catch (error) {
+      say("Could not update " + target + ": " + error.message, "error");
+    }
+  });
+}
+
+$("boot-toggle").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/boot", { method: "POST", body: "{}" });
+    say(result.message);
+    await refreshAll();
+  } catch (error) {
+    say("Could not change the startup setting: " + error.message, "error");
+  }
+});
+
+$("gateway-toggle").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/gateway", { method: "POST", body: "{}" });
+    say(result.message);
+    await refreshAll();
+  } catch (error) {
+    say("Could not change the gateway setting: " + error.message, "error");
+  }
+});
+
 $("registry-search").addEventListener("input", renderRegistry);
-
-for (const button of document.querySelectorAll("[data-connect]")) {
-  button.addEventListener("click", async () => {
-    try {
-      const result = await api("/api/connect", {
-        method: "POST",
-        body: JSON.stringify({ target: button.dataset.connect, action: "connect" }),
-      });
-      say(result.message || "Connected.");
-      await refreshAll();
-    } catch (error) {
-      say("Connect failed: " + error.message, "error");
-    }
-  });
-}
-
-for (const button of document.querySelectorAll("[data-disconnect]")) {
-  button.addEventListener("click", async () => {
-    try {
-      const result = await api("/api/connect", {
-        method: "POST",
-        body: JSON.stringify({ target: button.dataset.disconnect, action: "disconnect" }),
-      });
-      say(result.message || "Disconnected.");
-      await refreshAll();
-    } catch (error) {
-      say("Disconnect failed: " + error.message, "error");
-    }
-  });
-}
 
 refreshAll().catch((error) => say("Could not load state: " + error.message, "error"));
 loadRegistry().catch((error) => say("Could not load the OpenCode registry: " + error.message, "error"));

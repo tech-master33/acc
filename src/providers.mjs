@@ -24,9 +24,75 @@ import {
 } from "./anthropic.mjs";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+const OLLAMA_DEFAULT_BASE = "http://localhost:11434";
+const CREDENTIAL_CACHE_MS = 10_000;
 const REGISTRY_CATALOG_URL = "https://models.opencode.ai/api.json";
 const REGISTRY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_MODELS_PER_REGISTRY_ACCOUNT = 400;
+
+/**
+ * Where an OpenCode sign-in keeps its credential. The free OpenCode-hosted
+ * models need an OpenCode account credential rather than a third-party
+ * provider key, so ACC reads the one the CLI already wrote instead of asking
+ * the user to paste it again.
+ */
+function openCodeAuthPaths() {
+  if (process.env.ACC_OPENCODE_AUTH) return [process.env.ACC_OPENCODE_AUTH];
+  const home = os.homedir();
+  const paths = [
+    path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"), "opencode", "auth.json"),
+    path.join(home, ".config", "opencode", "auth.json"),
+  ];
+  if (process.env.APPDATA) paths.push(path.join(process.env.APPDATA, "opencode", "auth.json"));
+  if (process.env.LOCALAPPDATA) paths.push(path.join(process.env.LOCALAPPDATA, "opencode", "auth.json"));
+  return paths;
+}
+
+let credentialCache = { at: 0, value: null };
+
+/** Force the next lookup to re-read the OpenCode credential from disk. */
+export function invalidateCredentialCache() {
+  credentialCache = { at: 0, value: null };
+}
+
+/**
+ * Find an OpenCode credential: the environment first, then the file written by
+ * `opencode auth login`. Returns `{ key, source }` or null.
+ */
+export function readOpenCodeCredential({ now = Date.now(), refresh = false } = {}) {
+  if (!refresh && credentialCache.value && now - credentialCache.at < CREDENTIAL_CACHE_MS) {
+    return credentialCache.value;
+  }
+  let value = null;
+  if (process.env.OPENCODE_API_KEY) {
+    value = { key: process.env.OPENCODE_API_KEY.trim(), source: "OPENCODE_API_KEY" };
+  }
+  if (!value) {
+    for (const file of openCodeAuthPaths()) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+        const entry = parsed?.opencode ?? parsed?.["opencode-zen"];
+        const key = typeof entry === "string" ? entry : (entry?.key ?? entry?.access);
+        if (typeof key === "string" && key.trim()) {
+          value = { key: key.trim(), source: file };
+          break;
+        }
+      } catch {
+        /* missing or unreadable: try the next candidate */
+      }
+    }
+  }
+  credentialCache = { at: now, value };
+  return value;
+}
+
+/** The key to use for a provider that can borrow the OpenCode sign-in. */
+function resolveKey(config) {
+  if (config.apiKey) return { key: config.apiKey, source: "panel" };
+  if (config.useAccountCredential === false) return { key: "", source: null };
+  const credential = readOpenCodeCredential();
+  return credential ? { key: credential.key, source: credential.source } : { key: "", source: null };
+}
 
 /**
  * OpenCode's registry describes OpenAI-compatible providers by package name but
@@ -85,6 +151,12 @@ export const ZEN_BUILTIN_MODELS = [
   { id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro" },
   { id: "minimax-m2.7", displayName: "MiniMax M2.7" },
 ];
+
+/**
+ * The models OpenCode hosts itself and prices at zero. These need no
+ * third-party provider, only an OpenCode account credential.
+ */
+export const OPENCODE_BUILTIN_MODELS = ZEN_BUILTIN_MODELS.filter((row) => row.free);
 
 /**
  * The model ids the Codebuff/Freebuff desktop agent itself routes to, read from
@@ -167,9 +239,24 @@ function upstreamError(status, text) {
   return error;
 }
 
+/** Turn a transport failure into something a user can act on. */
+async function requestOrExplain(fetchImpl, url, init) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    const reason = error?.cause?.code ?? error?.code ?? error?.message ?? "unknown error";
+    const hint =
+      url.includes("localhost") || url.includes("127.0.0.1")
+        ? " Is the local server running?"
+        : " Check the base URL and your connection.";
+    throw Object.assign(new Error(`Could not reach ${url}: ${reason}.${hint}`), { status: 502 });
+  }
+}
+
 /** Shared request runner for OpenAI-compatible upstreams. */
 async function runOpenAIChat({ fetchImpl, baseUrl, apiKey, headers = {}, model, body, signal }) {
-  const response = await fetchImpl(openAIChatUrl(baseUrl), {
+  const response = await requestOrExplain(fetchImpl, openAIChatUrl(baseUrl), {
     method: "POST",
     signal,
     headers: {
@@ -181,6 +268,42 @@ async function runOpenAIChat({ fetchImpl, baseUrl, apiKey, headers = {}, model, 
   });
   if (!response.ok) throw upstreamError(response.status, await response.text());
   return response;
+}
+
+/**
+ * Shared Anthropic Messages request runner. Both OpenCode providers use it,
+ * because Zen already speaks Messages and a pass-through is the highest
+ * fidelity path available.
+ */
+async function runAnthropicMessages({ fetchImpl, baseUrl, apiKey, model, body, forceNoThinking, signal }) {
+  const payload = { ...body, model };
+  if (forceNoThinking) delete payload.thinking;
+
+  const response = await requestOrExplain(fetchImpl, anthropicMessagesUrl(baseUrl), {
+    method: "POST",
+    signal,
+    headers: {
+      "content-type": "application/json",
+      "anthropic-version": ANTHROPIC_VERSION,
+      ...(apiKey ? { "x-api-key": apiKey, authorization: `Bearer ${apiKey}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw upstreamError(response.status, await response.text());
+
+  if (!body.stream) return { stream: false, message: await response.json() };
+  return {
+    stream: true,
+    frames: (async function* () {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        yield decoder.decode(value, { stream: true });
+      }
+    })(),
+  };
 }
 
 /** ---- OpenCode Zen ---------------------------------------------------- */
@@ -202,74 +325,200 @@ const zen = {
     };
   },
 
-  async listModels(config, { fetchImpl = fetch } = {}) {
-    if (config.apiKey) {
-      try {
-        const response = await fetchImpl(`${String(config.baseUrl).replace(/\/+$/, "")}/models`, {
-          headers: { authorization: `Bearer ${config.apiKey}`, "x-api-key": config.apiKey },
-        });
-        if (response.ok) {
-          const payload = await response.json();
-          const rows = Array.isArray(payload?.data) ? payload.data : [];
-          const models = rows
-            .map((row) => ({
-              id: row.id,
-              displayName: row.name || row.id,
-              contextWindow: row.context_length ?? row.limit?.context ?? null,
-              maxOutput: row.max_output_tokens ?? row.limit?.output ?? null,
-              supportsReasoning: row.reasoning ?? null,
-            }))
-            .filter((row) => Boolean(row.id));
-          if (models.length) return { models, source: "live" };
-        }
-      } catch {
-        /* fall through to the builtin catalog */
-      }
-    }
-    return {
-      models: ZEN_BUILTIN_MODELS.map((row) => ({
-        id: row.id,
-        displayName: row.displayName,
-        free: Boolean(row.free),
-      })),
-      source: "builtin",
-    };
+  async listModels(config, ctx = {}) {
+    // Zen never borrows the OpenCode sign-in: its key is its own.
+    return listZenCompatibleModels(config, config.apiKey, {
+      ...ctx,
+      fallback: ZEN_BUILTIN_MODELS,
+    });
   },
 
   async handle({ config, upstreamModel, body, forceNoThinking, signal, fetchImpl = fetch }) {
-    // Zen exposes a native Anthropic Messages endpoint, so this is a
-    // pass-through: highest fidelity, and no translation bugs to inherit.
-    const payload = { ...body, model: upstreamModel };
-    if (forceNoThinking) delete payload.thinking;
-
-    const response = await fetchImpl(anthropicMessagesUrl(config.baseUrl), {
-      method: "POST",
+    return runAnthropicMessages({
+      fetchImpl,
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      model: upstreamModel,
+      body,
+      forceNoThinking,
       signal,
-      headers: {
-        "content-type": "application/json",
-        "anthropic-version": ANTHROPIC_VERSION,
-        "x-api-key": config.apiKey,
-        authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(payload),
     });
-    if (!response.ok) throw upstreamError(response.status, await response.text());
+  },
+};
 
-    if (!body.stream) {
-      return { stream: false, message: await response.json() };
+/** ---- OpenCode built-in models (free, via the OpenCode sign-in) -------- */
+
+async function listZenCompatibleModels(
+  config,
+  key,
+  { fetchImpl = fetch, fallback = OPENCODE_BUILTIN_MODELS } = {}
+) {
+  if (key) {
+    try {
+      const response = await requestOrExplain(
+        fetchImpl,
+        `${String(config.baseUrl).replace(/\/+$/, "")}/models`,
+        { headers: { authorization: `Bearer ${key}`, "x-api-key": key } }
+      );
+      if (response.ok) {
+        const payload = await response.json();
+        const rows = Array.isArray(payload?.data) ? payload.data : [];
+        const models = rows
+          .map((row) => ({
+            id: row.id,
+            displayName: row.name || row.id,
+            contextWindow: row.context_length ?? row.limit?.context ?? null,
+            maxOutput: row.max_output_tokens ?? row.limit?.output ?? null,
+            supportsReasoning: row.reasoning ?? null,
+          }))
+          .filter((row) => Boolean(row.id));
+        if (models.length) return { models, source: "live" };
+      }
+    } catch (error) {
+      if (error.status === 401) throw error;
+      /* otherwise fall back to the built-in catalog */
+    }
+  }
+  return {
+    models: fallback.map((row) => ({
+      id: row.id,
+      displayName: row.displayName,
+      free: Boolean(row.free),
+    })),
+    source: "builtin",
+  };
+}
+
+const opencodeBuiltin = {
+  id: "opencode-builtin",
+  label: "OpenCode built-in models (free)",
+  transport: "anthropic",
+  docsUrl: "https://opencode.ai/docs/zen/",
+  keyUrl: "https://opencode.ai/auth",
+
+  describe(config) {
+    const resolved = resolveKey(config);
+    const enabled = Boolean(config.enabled);
+    if (!enabled) {
+      return {
+        enabled,
+        ready: false,
+        detail: resolved.key
+          ? "Off by default. Your OpenCode sign-in was found, so switching this on needs no key."
+          : "Off by default. Run `opencode auth login`, or paste an OpenCode API key, to use the free models.",
+      };
+    }
+    if (!resolved.key) {
+      return {
+        enabled,
+        ready: false,
+        detail: "Enabled, but no OpenCode credential was found. Run `opencode auth login` or paste a key.",
+      };
     }
     return {
-      stream: true,
-      frames: (async function* () {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          yield decoder.decode(value, { stream: true });
-        }
-      })(),
+      enabled,
+      ready: true,
+      detail:
+        resolved.source === "panel"
+          ? "Using the OpenCode API key saved here. No third-party provider needed."
+          : `Using the OpenCode credential from ${resolved.source}. No third-party provider needed.`,
     };
+  },
+
+  async listModels(config, ctx = {}) {
+    return listZenCompatibleModels(config, resolveKey(config).key, ctx);
+  },
+
+  async handle({ config, upstreamModel, body, forceNoThinking, signal, fetchImpl = fetch }) {
+    const { key } = resolveKey(config);
+    if (!key) {
+      throw Object.assign(
+        new Error("No OpenCode credential. Run `opencode auth login` or paste a key in the ACC panel."),
+        { status: 401 }
+      );
+    }
+    return runAnthropicMessages({
+      fetchImpl,
+      baseUrl: config.baseUrl,
+      apiKey: key,
+      model: upstreamModel,
+      body,
+      forceNoThinking,
+      signal,
+    });
+  },
+};
+
+/** ---- Ollama (local, no key) ------------------------------------------ */
+
+const ollama = {
+  id: "ollama",
+  label: "Ollama (local)",
+  transport: "openai-chat",
+  docsUrl: "https://docs.ollama.com/api/openai-compatibility",
+
+  describe(config) {
+    const enabled = Boolean(config.enabled);
+    return {
+      enabled,
+      ready: enabled,
+      detail: enabled
+        ? `Using the Ollama server at ${config.baseUrl}. Models are whatever you have pulled locally.`
+        : `Off by default. Point this at your Ollama server (default ${OLLAMA_DEFAULT_BASE}); no API key needed.`,
+    };
+  },
+
+  async listModels(config, { fetchImpl = fetch } = {}) {
+    const base = String(config.baseUrl || OLLAMA_DEFAULT_BASE).replace(/\/+$/, "");
+    // Ollama's native tag list is the source of truth for pulled models.
+    try {
+      const response = await requestOrExplain(fetchImpl, `${base}/api/tags`, {});
+      if (response.ok) {
+        const payload = await response.json();
+        const models = (payload?.models ?? [])
+          .map((row) => ({
+            id: row.name ?? row.model,
+            displayName: row.name ?? row.model,
+            contextWindow: null,
+            maxOutput: null,
+          }))
+          .filter((row) => Boolean(row.id));
+        return { models, source: "live" };
+      }
+    } catch (error) {
+      if (error.status === 502) throw error;
+    }
+    const response = await requestOrExplain(fetchImpl, `${base}/v1/models`, {});
+    if (!response.ok) throw upstreamError(response.status, await response.text());
+    const payload = await response.json();
+    return {
+      models: (payload?.data ?? [])
+        .map((row) => ({
+          id: row.id,
+          displayName: row.id,
+          contextWindow: row.context_length ?? null,
+        }))
+        .filter((row) => Boolean(row.id)),
+      source: "live",
+    };
+  },
+
+  async handle({ config, upstreamModel, body, signal, fetchImpl = fetch }) {
+    const response = await runOpenAIChat({
+      fetchImpl,
+      baseUrl: config.baseUrl || OLLAMA_DEFAULT_BASE,
+      apiKey: config.apiKey,
+      model: upstreamModel,
+      body,
+      signal,
+    });
+    if (!body.stream) {
+      return {
+        stream: false,
+        message: fromOpenAIChatResponse(await response.json(), { model: upstreamModel }),
+      };
+    }
+    return { stream: true, frames: openAIStreamToAnthropic(response.body, { model: upstreamModel }) };
   },
 };
 
@@ -425,7 +674,13 @@ const registry = {
   },
 };
 
-export const ADAPTERS = { [zen.id]: zen, [codebuff.id]: codebuff, [registry.id]: registry };
+export const ADAPTERS = {
+  [zen.id]: zen,
+  [opencodeBuiltin.id]: opencodeBuiltin,
+  [ollama.id]: ollama,
+  [codebuff.id]: codebuff,
+  [registry.id]: registry,
+};
 
 export function getAdapter(providerId) {
   return ADAPTERS[providerId] ?? null;

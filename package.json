@@ -1,6 +1,6 @@
 {
   "name": "acc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ACC — one local Anthropic-compatible proxy that fronts the model families you bring (OpenCode Zen, OpenCode's built-in providers, Codebuff/Freebuff BYOK keys) so Claude Code and Claude Desktop can use them.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,7 @@
   "files": [
     "bin",
     "src",
+    "install",
     "README.md",
     "LICENSE"
   ],
@@ -21,6 +22,7 @@
     "dev": "node --watch bin/acc.mjs serve",
     "models": "node bin/acc.mjs models",
     "connect": "node bin/acc.mjs connect",
+    "build:release": "node scripts/build-release.mjs",
     "test": "node test/run.mjs"
   },
   "keywords": [

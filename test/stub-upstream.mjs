@@ -16,7 +16,21 @@ const ANTHROPIC_REPLY =
   "Hello from the stub Anthropic upstream. " +
   "This reply exists only so the proxy can be tested without a provider key.";
 
-export function startStubUpstream({ requireKey = "test-key" } = {}) {
+/**
+ * @param keys            credentials the stub accepts
+ * @param allowAnonymous  whether a missing credential is allowed, so a keyless
+ *                        local provider (Ollama) and a keyed one can both be
+ *                        exercised. A *wrong* credential is always refused.
+ */
+export function startStubUpstream({
+  keys = ["test-key", "opencode-account-key"],
+  allowAnonymous = true,
+} = {}) {
+  const accepted = new Set(keys);
+  const rejected = (value) => {
+    if (!value) return !allowAnonymous;
+    return !accepted.has(value);
+  };
   const seen = [];
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stub");
@@ -36,6 +50,14 @@ export function startStubUpstream({ requireKey = "test-key" } = {}) {
             { id: "stub-large", name: "Stub Large", context_length: 200000 },
           ],
         })
+      );
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/tags") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ models: [{ name: "llama3.2:3b", model: "llama3.2:3b", size: 2019393189 }] })
       );
       return;
     }
@@ -65,7 +87,7 @@ export function startStubUpstream({ requireKey = "test-key" } = {}) {
 
     if (request.method === "POST" && url.pathname.endsWith("/v1/messages")) {
       const apiKey = request.headers["x-api-key"];
-      if (requireKey && apiKey !== requireKey) {
+      if (rejected(typeof apiKey === "string" ? apiKey : "")) {
         response.writeHead(401, { "content-type": "application/json" });
         response.end(JSON.stringify({ type: "error", error: { message: "bad key" } }));
         return;
@@ -103,7 +125,9 @@ export function startStubUpstream({ requireKey = "test-key" } = {}) {
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/chat/completions")) {
-      if (requireKey && request.headers.authorization !== `Bearer ${requireKey}`) {
+      const authorization = request.headers.authorization ?? "";
+      const bearer = authorization.replace(/^Bearer\s+/i, "");
+      if (rejected(authorization ? bearer : "")) {
         response.writeHead(401, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: "bad key" } }));
         return;

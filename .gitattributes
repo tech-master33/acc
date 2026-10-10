@@ -1,0 +1,21 @@
+# Normalize text, but never let Windows line endings reach scripts: a CRLF
+# install.sh breaks `curl … | sh` on macOS and Linux.
+* text=auto
+
+*.sh   text eol=lf
+*.bash text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.cs   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+*.csproj text eol=lf
+*.sln    text eol=lf
+
+*.ico binary
+*.png binary
+*.exe binary
+*.zip binary

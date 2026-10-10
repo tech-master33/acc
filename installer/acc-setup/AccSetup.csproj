@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>acc-setup</AssemblyName>
+    <RootNamespace>AccSetup</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Version>0.2.0</Version>
+    <AssemblyTitle>ACC installer</AssemblyTitle>
+    <Product>ACC</Product>
+    <Description>Installs the ACC local Anthropic-compatible model gateway.</Description>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Bundled by installer/build-installer.mjs so the exe installs offline. -->
+    <EmbeddedResource Include="payload/acc.zip" LogicalName="acc.zip" Condition="Exists('payload/acc.zip')" />
+  </ItemGroup>
+
+</Project>

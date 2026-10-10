@@ -6,15 +6,32 @@
 import http from "node:http";
 
 import { anthropicError, estimateTokens, sse } from "./anthropic.mjs";
+import { applyBoot, bootStatus } from "./boot.mjs";
 import { collectModels, encodeCatalog, invalidateCatalog } from "./catalog.mjs";
 import { configPath, loadConfig, saveConfig, updateProvider } from "./config.mjs";
-import { connectClaudeCode, connectClaudeDesktop, disconnectClaudeCode, disconnectClaudeDesktop, desktopPaths, claudeCodeSettingsPath } from "./connect.mjs";
+import { desktopPaths, claudeCodeSettingsPath } from "./connect.mjs";
+import {
+  clientStatuses,
+  gatewayStatus,
+  makeOnlyGateway,
+  restoreGateways,
+  toggleClient,
+} from "./gateway.mjs";
 import { decodeModelId, splitRef } from "./ids.mjs";
-import { ADAPTERS, getAdapter } from "./providers.mjs";
+import { ADAPTERS, getAdapter, invalidateCredentialCache } from "./providers.mjs";
 import { panelHtml } from "./ui.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const PANEL_TARGETS = new Set(["claude-code", "claude-desktop"]);
+
+/** Which providers take a key, and which are keyless or keyed per sub-account. */
+const ADAPTER_META = {
+  "opencode-zen": { hasKeyInput: true, alwaysKeyed: true },
+  "opencode-builtin": { hasKeyInput: true, alwaysKeyed: true },
+  ollama: { hasKeyInput: false, alwaysKeyed: false },
+  codebuff: { hasKeyInput: true, alwaysKeyed: true },
+  "opencode-registry": { hasKeyInput: false, alwaysKeyed: false },
+};
 
 function sendJson(response, status, payload) {
   const body = JSON.stringify(payload);
@@ -121,6 +138,8 @@ export function createServer({ onConfigChange } = {}) {
     config = next;
     saveConfig(config);
     invalidateCatalog();
+    // A saved setting may be the credential itself, so drop the cached lookup.
+    invalidateCredentialCache();
     onConfigChange?.(config);
     return config;
   }
@@ -142,8 +161,8 @@ export function createServer({ onConfigChange } = {}) {
           ready: described.ready,
           detail: errors[adapter.id] ? `${described.detail} (${errors[adapter.id]})` : described.detail,
           apiKey: Boolean(providerConfig.apiKey),
-          hasKeyInput: adapter.id !== "opencode-registry",
-          alwaysKeyed: adapter.id !== "opencode-registry",
+          hasKeyInput: ADAPTER_META[adapter.id]?.hasKeyInput ?? false,
+          alwaysKeyed: ADAPTER_META[adapter.id]?.alwaysKeyed ?? false,
           baseUrl: providerConfig.baseUrl ?? "",
           docsUrl: adapter.docsUrl ?? null,
           keyUrl: adapter.keyUrl ?? null,
@@ -176,6 +195,9 @@ export function createServer({ onConfigChange } = {}) {
       authToken: config.authToken,
       configPath: configPath(),
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      clients: clientStatuses(config),
+      boot: { ...bootStatus(), runAtBoot: Boolean(config.runAtBoot) },
+      gateway: gatewayStatus(config),
       paths: {
         claudeCode: claudeCodeSettingsPath(),
         claudeDesktop: desktopPaths().profile,
@@ -297,22 +319,66 @@ export function createServer({ onConfigChange } = {}) {
       if (!PANEL_TARGETS.has(target)) {
         throw Object.assign(new Error("target must be claude-code or claude-desktop"), { status: 400 });
       }
-      const action = body.action === "disconnect" ? "disconnect" : "connect";
-      const result =
-        target === "claude-code"
-          ? action === "connect"
-            ? connectClaudeCode(config)
-            : disconnectClaudeCode()
-          : action === "connect"
-            ? connectClaudeDesktop(config)
-            : disconnectClaudeDesktop();
+      const current = clientStatuses(config);
+      const connected = target === "claude-code" ? current.claudeCode.connected : current.claudeDesktop.connected;
+      // The control is a toggle. An explicit action only acts when the client
+      // is not already in that state, so "connect" can never double-connect.
+      const desired = body.action
+        ? body.action === "connect"
+        : !connected;
+      if (desired === connected) {
+        sendJson(response, 200, {
+          ok: true,
+          changed: false,
+          target,
+          connected,
+          message: connected ? "Already connected." : "Already disconnected.",
+          state: clientStatuses(config),
+        });
+        return true;
+      }
+      const result = toggleClient(config, target);
       sendJson(response, 200, {
         ok: true,
-        action,
+        changed: true,
         target,
         message: result.message,
         path: result.path,
+        state: clientStatuses(config),
       });
+      return true;
+    }
+    if (request.method === "POST" && url.pathname === "/api/boot") {
+      const body = await readJson(request);
+      const enabled = typeof body.enabled === "boolean" ? body.enabled : !config.runAtBoot;
+      const status = applyBoot(enabled);
+      persist({ ...config, runAtBoot: status.enabled });
+      sendJson(response, 200, {
+        ok: true,
+        ...status,
+        runAtBoot: status.enabled,
+        message: status.enabled
+          ? `ACC will start when you sign in (${status.entry}).`
+          : "ACC will no longer start automatically.",
+      });
+      return true;
+    }
+    if (request.method === "POST" && url.pathname === "/api/gateway") {
+      const body = await readJson(request);
+      const active = Boolean(config.exclusiveGateway?.active);
+      const exclusive = typeof body.exclusive === "boolean" ? body.exclusive : !active;
+      if (exclusive === active) {
+        sendJson(response, 200, {
+          ok: true,
+          changed: false,
+          ...gatewayStatus(config),
+          message: active ? "ACC is already the only gateway." : "ACC is not in exclusive mode.",
+        });
+        return true;
+      }
+      const result = exclusive ? makeOnlyGateway(config) : restoreGateways(config);
+      persist(config);
+      sendJson(response, 200, { ok: true, changed: true, ...result, ...gatewayStatus(config) });
       return true;
     }
     return false;

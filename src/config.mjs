@@ -25,6 +25,27 @@ export const PROVIDER_DEFAULTS = {
     models: [],
     modelsFetchedAt: null,
   },
+  "opencode-builtin": {
+    label: "OpenCode built-in models (free)",
+    // The free OpenCode-hosted models. Needs an OpenCode account credential,
+    // not a third-party provider key; ACC finds that credential on its own.
+    enabled: false,
+    apiKey: "",
+    baseUrl: "https://opencode.ai/zen/v1",
+    transport: "anthropic",
+    useAccountCredential: true,
+    models: [],
+    modelsFetchedAt: null,
+  },
+  ollama: {
+    label: "Ollama (local)",
+    enabled: false,
+    apiKey: "",
+    baseUrl: "http://localhost:11434",
+    transport: "openai-chat",
+    models: [],
+    modelsFetchedAt: null,
+  },
   codebuff: {
     label: "Codebuff / Freebuff models",
     enabled: false,
@@ -63,6 +84,13 @@ export function defaultConfig() {
     hideClaudeModels: true,
     /** Model used when a client asks for a model ACC does not serve. */
     defaultModel: "",
+    /** Start ACC automatically when the user signs in. */
+    runAtBoot: false,
+    /**
+     * Set when the user makes ACC the only gateway: the other Claude Desktop
+     * third-party profiles are moved aside so their records can be restored.
+     */
+    exclusiveGateway: { active: false, movedProfiles: [] },
     providers: structuredClone(PROVIDER_DEFAULTS),
   };
 }
@@ -84,6 +112,10 @@ function deepMerge(base, override) {
 export function normalizeConfig(stored) {
   const merged = deepMerge(defaultConfig(), stored);
   merged.version = CONFIG_VERSION;
+  if (!Array.isArray(merged.exclusiveGateway?.movedProfiles)) {
+    merged.exclusiveGateway = { active: false, movedProfiles: [] };
+  }
+  merged.runAtBoot = Boolean(merged.runAtBoot);
   merged.providers = {};
   for (const [id, defaults] of Object.entries(PROVIDER_DEFAULTS)) {
     merged.providers[id] = deepMerge(structuredClone(defaults), (stored?.providers ?? {})[id]);

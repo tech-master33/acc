@@ -11,17 +11,17 @@
 
 import fs from "node:fs";
 
+import { applyBoot, bootStatus } from "../src/boot.mjs";
 import { collectModels, encodeCatalog } from "../src/catalog.mjs";
 import { configPath, loadConfig, saveConfig } from "../src/config.mjs";
+import { claudeCodeSettingsPath, desktopPaths, gatewayUrl } from "../src/connect.mjs";
 import {
-  claudeCodeSettingsPath,
-  connectClaudeCode,
-  connectClaudeDesktop,
-  desktopPaths,
-  disconnectClaudeCode,
-  disconnectClaudeDesktop,
-  gatewayUrl,
-} from "../src/connect.mjs";
+  clientStatuses,
+  gatewayStatus,
+  makeOnlyGateway,
+  restoreGateways,
+  toggleClient,
+} from "../src/gateway.mjs";
 import { ADAPTERS } from "../src/providers.mjs";
 import { createServer } from "../src/server.mjs";
 
@@ -31,9 +31,12 @@ Usage:
   acc serve [--port <n>] [--host <addr>]   Start the proxy and the control panel.
   acc models [--view claude|claude-desktop]
                                            Print the model catalog for a view.
-  acc connect <claude-code|claude-desktop> Wire a Claude client to this proxy.
-  acc disconnect <target>                  Undo that wiring.
-  acc status                               Show providers, models and config paths.
+  acc connect <claude-code|claude-desktop> Toggle a Claude client: connects when
+                                           disconnected, disconnects when connected.
+                                           Add --on or --off to force one direction.
+  acc boot <on|off|status>                 Start ACC automatically at sign-in.
+  acc gateway <only|restore|status>        Make ACC the only gateway, or undo it.
+  acc status                               Show providers, clients, models and paths.
   acc --help
 
 Configuration lives in ${configPath()} and is edited most easily in the control
@@ -69,10 +72,22 @@ async function serve(flags) {
   const port = flags.port ? Number(flags.port) : config.port;
   const host = flags.host ? String(flags.host) : config.host;
 
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, resolve);
-  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, host, resolve);
+    });
+  } catch (error) {
+    if (error.code === "EADDRINUSE") {
+      process.stderr.write(
+        `${host}:${port} is already in use, so ACC is probably already running.\n` +
+          "Open the panel, or start a second copy with: acc serve --port <other>\n"
+      );
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
 
   const address = server.address();
   process.stdout.write(
@@ -114,6 +129,8 @@ async function models(flags) {
 
 async function status() {
   const config = loadConfig();
+  const clients = clientStatuses(config);
+  const gateway = gatewayStatus(config);
   process.stdout.write(`Gateway:  ${gatewayUrl(config)}\n`);
   process.stdout.write(`Config:   ${configPath()}\n`);
   process.stdout.write(`Claude Code settings:   ${claudeCodeSettingsPath()}\n`);
@@ -121,7 +138,20 @@ async function status() {
   process.stdout.write(
     `Hide Claude models: ${config.hideClaudeModels ? "yes" : "no"}\n`
   );
-  process.stdout.write(`Fallback model: ${config.defaultModel || "(first available)"}\n\n`);
+  process.stdout.write(`Fallback model: ${config.defaultModel || "(first available)"}\n`);
+  process.stdout.write(
+    `Start at sign-in: ${bootStatus().enabled ? "on" : "off"} (${bootStatus().entry})\n`
+  );
+  process.stdout.write(
+    `Exclusive gateway: ${gateway.exclusive ? `on (set aside: ${gateway.movedProfiles.map((p) => p.name).join(", ") || "nothing"})` : "off"}\n`
+  );
+  process.stdout.write(`\nClients:\n`);
+  process.stdout.write(
+    `  Claude Code:    ${clients.claudeCode.connected ? "connected" : "not connected"} — ${clients.claudeCode.detail}\n`
+  );
+  process.stdout.write(
+    `  Claude Desktop: ${clients.claudeDesktop.connected ? "connected" : "not connected"} — ${clients.claudeDesktop.detail}\n\n`
+  );
   const { models: list, errors } = await collectModels(config, { refresh: true });
   for (const adapter of Object.values(ADAPTERS)) {
     const providerConfig = config.providers?.[adapter.id] ?? {};
@@ -136,20 +166,27 @@ async function status() {
   for (const model of list) process.stdout.write(`  ${model.ref}\n`);
 }
 
-async function connect(target, action) {
+/**
+ * `--on`/`--off` force a direction; with neither, the client is toggled, so
+ * the command can never ask to connect something already connected.
+ */
+async function connect(target, flags = {}) {
   const config = loadConfig();
-  const run = {
-    "claude-code": action === "disconnect" ? disconnectClaudeCode : () => connectClaudeCode(config),
-    "claude-desktop":
-      action === "disconnect" ? () => disconnectClaudeDesktop() : () => connectClaudeDesktop(config),
-  }[target];
-  if (!run) {
+  if (!["claude-code", "claude-desktop"].includes(target)) {
     process.stderr.write(`Unknown target "${target}". Use claude-code or claude-desktop.\n`);
     process.exitCode = 1;
     return;
   }
   try {
-    const result = run();
+    const clients = clientStatuses(config);
+    const connected =
+      target === "claude-code" ? clients.claudeCode.connected : clients.claudeDesktop.connected;
+    const forced = flags.on ? true : flags.off ? false : null;
+    if (forced !== null && forced === connected) {
+      process.stdout.write(`Already ${connected ? "connected" : "disconnected"}. Nothing to do.\n`);
+      return;
+    }
+    const result = toggleClient(config, target);
     process.stdout.write(`${result.message}\n`);
     if (result.path) process.stdout.write(`Wrote: ${result.path}\n`);
   } catch (error) {
@@ -158,8 +195,69 @@ async function connect(target, action) {
   }
 }
 
+async function boot(action) {
+  const config = loadConfig();
+  try {
+    if (action === "status" || action === undefined) {
+      const status = bootStatus();
+      process.stdout.write(
+        `Start ACC at sign-in: ${status.enabled ? "on" : "off"}\nEntry: ${status.entry}\n`
+      );
+      return;
+    }
+    if (!["on", "off"].includes(action)) {
+      process.stderr.write("Use: acc boot on|off|status\n");
+      process.exitCode = 1;
+      return;
+    }
+    const status = applyBoot(action === "on");
+    saveConfig({ ...config, runAtBoot: status.enabled });
+    process.stdout.write(
+      status.enabled
+        ? `ACC will start when you sign in.\nEntry: ${status.entry}\n`
+        : `ACC will no longer start automatically.\n`
+    );
+  } catch (error) {
+    process.stderr.write(`Failed: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+async function gateway(action) {
+  const config = loadConfig();
+  try {
+    if (action === undefined || action === "status") {
+      const status = gatewayStatus(config);
+      process.stdout.write(
+        `Exclusive gateway: ${status.exclusive ? "on" : "off"}\n` +
+          `Set aside: ${status.movedProfiles.map((item) => item.name).join(", ") || "nothing"}\n` +
+          `Library: ${status.library}\n`
+      );
+      return;
+    }
+    if (action === "only") {
+      const result = makeOnlyGateway(config);
+      saveConfig(config);
+      process.stdout.write(`${result.message}\n`);
+      return;
+    }
+    if (action === "restore") {
+      const result = restoreGateways(config);
+      saveConfig(config);
+      process.stdout.write(`${result.message}\n`);
+      return;
+    }
+    process.stderr.write("Use: acc gateway only|restore|status\n");
+    process.exitCode = 1;
+  } catch (error) {
+    process.stderr.write(`Failed: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
 const { flags, positional } = parseArgs(process.argv.slice(2));
-const command = positional[0] ?? "serve";
+// `--help` is parsed as a flag, not a positional, so it has to be picked up here.
+const command = flags.help || flags.h ? "help" : (positional[0] ?? "serve");
 
 switch (command) {
   case "serve":
@@ -172,10 +270,16 @@ switch (command) {
     await status();
     break;
   case "connect":
-    await connect(positional[1], "connect");
+    await connect(positional[1], { on: flags.on === true, off: flags.off === true });
     break;
   case "disconnect":
-    await connect(positional[1], "disconnect");
+    await connect(positional[1], { off: true });
+    break;
+  case "boot":
+    await boot(positional[1]);
+    break;
+  case "gateway":
+    await gateway(positional[1]);
     break;
   case "help":
   case "--help":

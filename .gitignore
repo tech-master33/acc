@@ -1,6 +1,10 @@
 node_modules/
 scratch/
 .freebuff/
+dist/
+installer/acc-setup/payload/
+installer/acc-setup/bin/
+installer/acc-setup/obj/
 *.log
 *.tmp
 .acc/

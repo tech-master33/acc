@@ -9,17 +9,29 @@ import os from "node:os";
 import path from "node:path";
 
 import { fromOpenAIChatResponse, openAIStreamToAnthropic, toOpenAIChatRequest } from "../src/anthropic.mjs";
+import { applyBoot, bootStatus } from "../src/boot.mjs";
 import { collectModels, encodeCatalog, invalidateCatalog } from "../src/catalog.mjs";
+import { loadConfig } from "../src/config.mjs";
 import { claudeModelId, decodeModelId, desktopModelId } from "../src/ids.mjs";
 import { createServer } from "../src/server.mjs";
 import {
   ACC_DESKTOP_ID,
   connectClaudeCode,
   connectClaudeDesktop,
+  desktopPaths,
   disconnectClaudeCode,
   disconnectClaudeDesktop,
   uuidv5,
 } from "../src/connect.mjs";
+import {
+  clientStatuses,
+  gatewayStatus,
+  makeOnlyGateway,
+  restoreGateways,
+  sameGatewayUrl,
+  toggleClient,
+} from "../src/gateway.mjs";
+import { readOpenCodeCredential } from "../src/providers.mjs";
 import { startStubUpstream } from "./stub-upstream.mjs";
 
 const TOKEN = "test-token";
@@ -38,6 +50,15 @@ async function test(name, fn) {
 
 function tempDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `acc-${label}-`));
+}
+
+async function postJson(pathname, body) {
+  const response = await fetch(`${base}${pathname}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return response.json();
 }
 
 async function readSse(response) {
@@ -169,6 +190,14 @@ const root = tempDir("home");
 process.env.ACC_CONFIG_PATH = path.join(root, "config.json");
 process.env.CLAUDE_CONFIG_DIR = path.join(root, "claude");
 process.env.ACC_CLAUDE_DESKTOP_ROOT = path.join(root, "Claude-3p");
+// Never touch the real Startup folder or the real OpenCode sign-in.
+process.env.ACC_BOOT_ENTRY = path.join(root, "boot-entry.vbs");
+const openCodeAuthPath = path.join(root, "opencode-auth.json");
+process.env.ACC_OPENCODE_AUTH = openCodeAuthPath;
+fs.writeFileSync(
+  openCodeAuthPath,
+  JSON.stringify({ opencode: { type: "api", key: "opencode-account-key" } })
+);
 
 fs.mkdirSync(path.dirname(process.env.ACC_CONFIG_PATH), { recursive: true });
 fs.writeFileSync(
@@ -181,6 +210,8 @@ fs.writeFileSync(
     defaultModel: "codebuff/stub-fallback",
     providers: {
       "opencode-zen": { enabled: true, apiKey: "test-key", baseUrl: `${stubOrigin}/v1` },
+      "opencode-builtin": { enabled: true, apiKey: "", baseUrl: `${stubOrigin}/v1` },
+      ollama: { enabled: true, apiKey: "", baseUrl: stubOrigin },
       codebuff: { enabled: true, apiKey: "test-key", baseUrl: stubOrigin },
       "opencode-registry": {
         enabled: true,
@@ -408,15 +439,24 @@ await test("a rejected upstream credential surfaces as 401 with an Anthropic err
   assert.equal(accepted.status, 200);
 });
 
-await test("control panel state reports providers and paths", async () => {
+await test("control panel state reports providers, clients, boot and gateway", async () => {
   const response = await fetch(`${base}/api/state`);
   assert.equal(response.status, 200);
   const state = await response.json();
   assert.equal(state.port, 0);
-  assert.equal(state.adapters.length, 3);
+  assert.deepEqual(
+    state.adapters.map((adapter) => adapter.id).sort(),
+    ["codebuff", "ollama", "opencode-builtin", "opencode-registry", "opencode-zen"]
+  );
   assert.equal(state.adapters.find((a) => a.id === "opencode-zen").enabled, true);
+  // Ollama takes no key, so the panel must not offer a key field for it.
+  assert.equal(state.adapters.find((a) => a.id === "ollama").hasKeyInput, false);
   assert.ok(state.models.length >= 3);
   assert.ok(state.paths.claudeCode.endsWith("settings.json"));
+  assert.equal(typeof state.clients.claudeCode.connected, "boolean");
+  assert.equal(typeof state.clients.claudeDesktop.connected, "boolean");
+  assert.equal(state.boot.enabled, false);
+  assert.equal(state.gateway.exclusive, false);
 });
 
 await test("disabling a provider removes its models from the catalog", async () => {
@@ -511,6 +551,168 @@ await test("connecting Claude Desktop preserves another vendor's entry", () => {
   connectClaudeDesktop({ host: "127.0.0.1", port: 8788, authToken: TOKEN });
   const after = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   assert.ok(after.entries.some((entry) => entry.name === "FCC"), "FCC entry untouched");
+});
+
+/* ------------------------------------------- startup, gateway and the new providers */
+
+await test("sameGatewayUrl treats localhost and 127.0.0.1 as one gateway", () => {
+  assert.equal(sameGatewayUrl("http://127.0.0.1:8788", "http://localhost:8788/"), true);
+  assert.equal(sameGatewayUrl("http://127.0.0.1:8788", "http://127.0.0.1:8082"), false);
+  assert.equal(sameGatewayUrl("not a url", "http://127.0.0.1:8788"), false);
+});
+
+await test("the OpenCode sign-in credential is discovered automatically", () => {
+  const credential = readOpenCodeCredential({ refresh: true });
+  assert.ok(credential, "a credential was found");
+  assert.equal(credential.key, "opencode-account-key");
+  assert.equal(credential.source, openCodeAuthPath);
+});
+
+await test("OpenCode built-in models work with no third-party provider key", async () => {
+  const response = await fetch(`${base}/v1/models`, { headers: { "x-api-key": TOKEN } });
+  const payload = await response.json();
+  assert.ok(
+    payload.data.some((model) => model.id.startsWith("anthropic/opencode-builtin/")),
+    "built-in models are advertised"
+  );
+
+  const call = await fetch(`${base}/v1/messages`, {
+    method: "POST",
+    headers: { "x-api-key": TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "anthropic/opencode-builtin/stub-small",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  assert.equal(call.status, 200);
+  const upstream = stub.seen.at(-1);
+  assert.equal(upstream.headers["x-api-key"], "opencode-account-key");
+  assert.equal(upstream.body.model, "stub-small");
+});
+
+await test("Ollama models come from the local tag list and keep their tag", async () => {
+  const response = await fetch(`${base}/v1/models`, { headers: { "x-api-key": TOKEN } });
+  const payload = await response.json();
+  assert.ok(
+    payload.data.some((model) => model.id === "anthropic/ollama/llama3.2:3b"),
+    "local model advertised with its tag intact"
+  );
+
+  const call = await fetch(`${base}/v1/messages`, {
+    method: "POST",
+    headers: { "x-api-key": TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "anthropic/ollama/llama3.2:3b",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  const message = await call.json();
+  assert.equal(message.content[0].text, "Hello from the stub OpenAI upstream.");
+  const upstream = stub.seen.at(-1);
+  assert.equal(upstream.body.model, "llama3.2:3b");
+  assert.equal(upstream.path, "/v1/chat/completions");
+});
+
+await test("an unreachable local provider explains itself instead of hanging", async () => {
+  await postJson("/api/config", { providers: { ollama: { baseUrl: "http://127.0.0.1:9" } } });
+  const response = await fetch(`${base}/v1/messages`, {
+    method: "POST",
+    headers: { "x-api-key": TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "anthropic/ollama/llama3.2:3b",
+      max_tokens: 8,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  const payload = await response.json();
+  await postJson("/api/config", { providers: { ollama: { baseUrl: stubOrigin } } });
+  assert.equal(response.status, 502);
+  assert.match(payload.error.message, /Could not reach/);
+  assert.match(payload.error.message, /local server running/i);
+});
+
+await test("start-at-sign-in writes one entry and removing it cleans up", () => {
+  assert.equal(bootStatus().enabled, false);
+  assert.equal(applyBoot(true).enabled, true);
+  assert.ok(fs.existsSync(process.env.ACC_BOOT_ENTRY));
+  assert.match(fs.readFileSync(process.env.ACC_BOOT_ENTRY, "utf8"), /acc\.mjs/);
+  assert.equal(applyBoot(false).enabled, false);
+  assert.ok(!fs.existsSync(process.env.ACC_BOOT_ENTRY));
+});
+
+await test("the panel startup control toggles the entry", async () => {
+  const on = await postJson("/api/boot", {});
+  assert.equal(on.runAtBoot, true);
+  assert.ok(fs.existsSync(process.env.ACC_BOOT_ENTRY));
+  const off = await postJson("/api/boot", {});
+  assert.equal(off.runAtBoot, false);
+  assert.ok(!fs.existsSync(process.env.ACC_BOOT_ENTRY));
+});
+
+await test("one control per client: it connects, then disconnects", async () => {
+  const config = loadConfig();
+  if (clientStatuses(config).claudeCode.connected) toggleClient(config, "claude-code");
+
+  const first = await postJson("/api/connect", { target: "claude-code" });
+  assert.equal(first.changed, true);
+  assert.equal(first.state.claudeCode.connected, true);
+
+  const second = await postJson("/api/connect", { target: "claude-code" });
+  assert.equal(second.changed, true);
+  assert.equal(second.state.claudeCode.connected, false);
+
+  const forced = await postJson("/api/connect", { target: "claude-code", action: "connect" });
+  assert.equal(forced.state.claudeCode.connected, true);
+
+  // An explicit connect must not re-connect something already connected.
+  const redundant = await postJson("/api/connect", { target: "claude-code", action: "connect" });
+  assert.equal(redundant.changed, false);
+  assert.match(redundant.message, /Already connected/);
+});
+
+await test("exclusive mode sets other gateways aside and restores them", () => {
+  const config = loadConfig();
+  const paths = desktopPaths();
+  const otherId = "dfa3d5c4-9f50-5e40-8aac-a12c8c32a0e0";
+  const otherProfile = path.join(paths.library, `${otherId}.json`);
+  fs.mkdirSync(paths.library, { recursive: true });
+  fs.writeFileSync(
+    otherProfile,
+    JSON.stringify({ inferenceProvider: "gateway", inferenceGatewayBaseUrl: "http://127.0.0.1:8082" })
+  );
+  const meta = JSON.parse(fs.readFileSync(paths.meta, "utf8"));
+  if (!meta.entries.some((entry) => entry.id === otherId)) {
+    meta.entries.push({ id: otherId, name: "FCC" });
+  }
+  fs.writeFileSync(paths.meta, JSON.stringify(meta));
+
+  const only = makeOnlyGateway(config);
+  assert.equal(gatewayStatus(config).exclusive, true);
+  assert.ok(only.movedProfiles.some((item) => item.name === "FCC"));
+  assert.equal(fs.existsSync(otherProfile), false, "other profile moved aside");
+  assert.equal(fs.existsSync(`${otherProfile}.acc-disabled`), true, "and kept, not deleted");
+  const afterMeta = JSON.parse(fs.readFileSync(paths.meta, "utf8"));
+  assert.equal(afterMeta.appliedId, ACC_DESKTOP_ID);
+  assert.ok(!afterMeta.entries.some((entry) => entry.id === otherId));
+  assert.equal(clientStatuses(config).claudeDesktop.connected, true);
+
+  const back = restoreGateways(config);
+  assert.equal(gatewayStatus(config).exclusive, false);
+  assert.ok(back.restored.includes("FCC"));
+  assert.equal(fs.existsSync(otherProfile), true, "other profile restored");
+  assert.ok(
+    JSON.parse(fs.readFileSync(paths.meta, "utf8")).entries.some((entry) => entry.id === otherId),
+    "and listed again"
+  );
+});
+
+await test("the panel gateway control toggles exclusive mode", async () => {
+  const on = await postJson("/api/gateway", {});
+  assert.equal(on.active, true);
+  const off = await postJson("/api/gateway", {});
+  assert.equal(off.active, false);
 });
 
 /* ------------------------------------------------------------------ teardown */

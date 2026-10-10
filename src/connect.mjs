@@ -59,7 +59,7 @@ export function claudeCodeSettingsPath() {
   return path.join(dir, "settings.json");
 }
 
-function readJsonFile(file) {
+export function readJsonFile(file) {
   try {
     const text = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
     if (!text.trim()) return {};
@@ -71,7 +71,7 @@ function readJsonFile(file) {
   }
 }
 
-function writeJsonFile(file, value) {
+export function writeJsonFile(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const backup = `${file}.acc-backup`;
   if (fs.existsSync(file) && !fs.existsSync(backup)) {
