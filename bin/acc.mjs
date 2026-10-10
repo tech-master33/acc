@@ -38,6 +38,7 @@ Usage:
   acc gateway <only|restore|status>        Make ACC the only gateway, or undo it.
   acc status                               Show providers, clients, models and paths.
   acc --help
+  acc --version
 
 Configuration lives in ${configPath()} and is edited most easily in the control
 panel, which is served at ${gatewayUrl(loadConfig())} while \`acc serve\` runs.`;
@@ -255,9 +256,30 @@ async function gateway(action) {
   }
 }
 
-const { flags, positional } = parseArgs(process.argv.slice(2));
-// `--help` is parsed as a flag, not a positional, so it has to be picked up here.
-const command = flags.help || flags.h ? "help" : (positional[0] ?? "serve");
+const rawArgs = process.argv.slice(2);
+const { flags, positional } = parseArgs(rawArgs);
+// `--help` and `--version` are parsed as flags, not positionals, so they have to
+// be picked up here.
+const version = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")
+).version;
+// A leading flag that `serve` does not understand is a typo, not a request to
+// start the proxy. Without this, `acc --version` silently started a server.
+const serveFlags = new Set(["port", "host"]);
+const firstRaw = rawArgs[0];
+const strayFlag =
+  positional.length === 0 &&
+  typeof firstRaw === "string" &&
+  /^--?\w/.test(firstRaw) &&
+  !serveFlags.has(firstRaw.replace(/^--?/, "").split("=")[0]);
+const command =
+  flags.help || flags.h
+    ? "help"
+    : flags.version || flags.v
+      ? "version"
+      : strayFlag
+        ? firstRaw
+        : (positional[0] ?? "serve");
 
 switch (command) {
   case "serve":
@@ -285,6 +307,11 @@ switch (command) {
   case "--help":
   case "-h":
     process.stdout.write(`${HELP}\n`);
+    break;
+  case "version":
+  case "--version":
+  case "-v":
+    process.stdout.write(`${version}\n`);
     break;
   default:
     process.stderr.write(`Unknown command "${command}".\n\n${HELP}\n`);

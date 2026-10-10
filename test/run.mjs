@@ -4,9 +4,11 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { fromOpenAIChatResponse, openAIStreamToAnthropic, toOpenAIChatRequest } from "../src/anthropic.mjs";
 import { applyBoot, bootStatus } from "../src/boot.mjs";
@@ -36,6 +38,14 @@ import { startStubUpstream } from "./stub-upstream.mjs";
 
 const TOKEN = "test-token";
 const results = [];
+const cliPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "acc.mjs");
+const cliVersion = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")
+).version;
+
+function runCli(...args) {
+  return spawnSync(process.execPath, [cliPath, ...args], { encoding: "utf8" });
+}
 
 async function test(name, fn) {
   try {
@@ -631,6 +641,27 @@ await test("an unreachable local provider explains itself instead of hanging", a
   assert.equal(response.status, 502);
   assert.match(payload.error.message, /Could not reach/);
   assert.match(payload.error.message, /local server running/i);
+});
+
+await test("acc --version prints the version instead of starting a server", () => {
+  const output = execFileSync(process.execPath, [cliPath, "--version"], { encoding: "utf8" });
+  assert.equal(output.trim(), cliVersion);
+});
+
+await test("an unknown flag is refused, it does not fall through to starting the server", () => {
+  const result = runCli("--definitely-not-a-command");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown command "--definitely-not-a-command"/);
+  // Usage goes to stderr on the error path so it never pollutes piped output.
+  assert.match(result.stderr, /Usage:/);
+  assert.equal(result.stdout, "");
+  assert.doesNotMatch(result.stdout + result.stderr, /already in use/);
+});
+
+await test("acc --help still prints usage", () => {
+  const result = runCli("--help");
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage:/);
 });
 
 await test("start-at-sign-in writes one entry and removing it cleans up", () => {
