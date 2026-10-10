@@ -14,7 +14,8 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <Version>0.2.0</Version>
+    <!-- Overridden by scripts/build-release.mjs with the package.json version. -->
+    <Version>0.2.1</Version>
     <AssemblyTitle>ACC installer</AssemblyTitle>
     <Product>ACC</Product>
     <Description>Installs the ACC local Anthropic-compatible model gateway.</Description>
