@@ -56,7 +56,9 @@ export const PROVIDER_DEFAULTS = {
     modelsFetchedAt: null,
   },
   "opencode-registry": {
-    label: "OpenCode built-in providers",
+    // Distinct from "OpenCode built-in models (free)" above, which is the
+    // zero-priced hosted set rather than this third-party provider directory.
+    label: "OpenCode provider registry",
     enabled: false,
     baseUrl: "https://models.opencode.ai/api.json",
     transport: "openai-chat",
