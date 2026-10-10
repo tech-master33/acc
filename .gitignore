@@ -1,0 +1,9 @@
+node_modules/
+scratch/
+.freebuff/
+*.log
+*.tmp
+.acc/
+.env
+.DS_Store
+Thumbs.db

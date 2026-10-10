@@ -1,0 +1,41 @@
+{
+  "name": "acc",
+  "version": "0.1.0",
+  "description": "ACC — one local Anthropic-compatible proxy that fronts the model families you bring (OpenCode Zen, OpenCode's built-in providers, Codebuff/Freebuff BYOK keys) so Claude Code and Claude Desktop can use them.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "acc": "./bin/acc.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/acc.mjs serve",
+    "dev": "node --watch bin/acc.mjs serve",
+    "models": "node bin/acc.mjs models",
+    "connect": "node bin/acc.mjs connect",
+    "test": "node test/run.mjs"
+  },
+  "keywords": [
+    "anthropic",
+    "claude-code",
+    "claude-desktop",
+    "opencode",
+    "opencode-zen",
+    "codebuff",
+    "freebuff",
+    "llm-proxy",
+    "ai-gateway"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tech-master33/acc.git"
+  }
+}
